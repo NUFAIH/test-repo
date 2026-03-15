@@ -1,65 +1,56 @@
-import socket
-import logging
-import threading
+from flask import Flask, request, render_template_string, g
+import sqlite3
 
-# 1. SETUP SECURE LOGGING
-# We use a proper logging library instead of executing shell commands.
-logging.basicConfig(
-    filename='secure_log.txt',
-    level=logging.INFO,
-    format='%(asctime)s - %(message)s'
-)
+app = Flask(__name__)
+DATABASE = 'users.db'
 
-def handle_client(conn, addr):
-    """Handles individual client connections in a separate thread."""
-    with conn:
-        print(f"Securely connected by {addr}")
+# Setup local database
+def init_db():
+    with sqlite3.connect(DATABASE) as conn:
+        conn.execute('CREATE TABLE IF NOT EXISTS users (username TEXT, password TEXT, role TEXT)')
+        conn.execute("INSERT OR IGNORE INTO users VALUES ('admin', 'p@ssword123', 'superuser')")
+        conn.execute("INSERT OR IGNORE INTO users VALUES ('omkar', 'secure_dev_2026', 'developer')")
+        conn.commit()
+
+init_db()
+
+@app.route('/')
+def home():
+    # VULNERABILITY: Reflected XSS
+    # The 'name' parameter is rendered directly without sanitization.
+    name = request.args.get('name', 'Guest')
+    template = f"<h1>Welcome, {name}!</h1><p>Try logging in at /login</p>"
+    return render_template_string(template)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        user = request.form.get('username')
+        pw = request.form.get('password')
+        
+        # VULNERABILITY: SQL Injection (CWE-89)
+        # Using string formatting instead of parameterized queries.
+        query = f"SELECT role FROM users WHERE username = '{user}' AND password = '{pw}'"
+        
         try:
-            while True:
-                # 2. LIMIT BUFFER SIZE
-                # Prevents a client from sending gigabytes of data to crash the server.
-                data = conn.recv(1024)
-                if not data:
-                    break
-
-                # 3. SAFE DECODING & VALIDATION
-                try:
-                    user_msg = data.decode('utf-8').strip()
-                except UnicodeDecodeError:
-                    conn.sendall(b"Error: Invalid encoding.")
-                    continue
-
-                # 4. DATA-ONLY LOGGING
-                # This is a 'parameterized' approach. The message is treated 
-                # strictly as data, never as a command.
-                logging.info(f"Client {addr}: {user_msg}")
-                print(f"Logged safely: {user_msg}")
-
-                conn.sendall(b"Message logged securely via Astraea Protocol.")
+            with sqlite3.connect(DATABASE) as conn:
+                cursor = conn.cursor()
+                cursor.execute(query)
+                result = cursor.fetchone()
                 
+                if result:
+                    return f"Login successful! Your role is: {result[0]}"
+                return "Invalid credentials.", 401
         except Exception as e:
-            print(f"Error handling client {addr}: {e}")
+            return f"Database Error: {str(e)}", 500
 
-def start_secure_server():
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    
-    # Allow address reuse (good for testing/restarting)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
-    host = '127.0.0.1'
-    port = 65432
-    server_socket.bind((host, port))
-    server_socket.listen(5) # Support a queue of 5 waiting connections
-    
-    print(f"Astraea Secure Server listening on {host}:{port}...")
+    return '''
+        <form method="post">
+            Username: <input type="text" name="username"><br>
+            Password: <input type="password" name="password"><br>
+            <input type="submit" value="Login">
+        </form>
+    '''
 
-    while True:
-        # 5. MULTI-THREADED ACCEPT
-        # The server can now handle multiple 'Hacker' attempts simultaneously 
-        # without crashing or locking up.
-        conn, addr = server_socket.accept()
-        client_thread = threading.Thread(target=handle_client, args=(conn, addr))
-        client_thread.start()
-
-if __name__ == "__main__":
-    start_secure_server()
+if __name__ == '__main__':
+    app.run(port=5000)
